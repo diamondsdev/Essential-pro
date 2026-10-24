@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Outer defensive shield contour -->
+    <path
+        android:fillColor="#38BDF8"
+        android:pathData="M54,24 L78,34 C78,56 68,72 54,82 C40,72 30,56 30,34 Z" />
+    <!-- Inner darker shield plate -->
+    <path
+        android:fillColor="#0284C7"
+        android:pathData="M54,28 L74,36.5 C74,54.5 65.5,68 54,76.5 C42.5,68 34,54.5 34,36.5 Z" />
+    <!-- Inner core defense glow -->
+    <path
+        android:fillColor="#0369A1"
+        android:pathData="M54,34 L69,40.5 C69,54 62,64 54,70.5 C46,64 39,54 39,40.5 Z" />
+    <!-- High-contrast checkmark / verification symbol -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M50,58 L42,50 L45.5,46.5 L50,51 L62.5,38.5 L66,42 Z" />
+</vector>
