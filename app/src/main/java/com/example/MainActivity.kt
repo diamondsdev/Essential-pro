@@ -140,13 +140,37 @@ fun MainApp(viewModel: SentinelViewModel) {
                     }
                 },
                 actions = {
-                    val isAuthActive = auth != null && auth!!.explicitTestingPermitted
+                    val statusText: String
+                    val statusColor: Color
+                    when {
+                        auth == null -> {
+                            statusText = "ROA REQUIRED"
+                            statusColor = Color(0xFFEF4444)
+                        }
+                        auth?.isDemo == true -> {
+                            statusText = "DEMO SPECIMEN"
+                            statusColor = SentinelCyan
+                        }
+                        auth?.verificationStatus == com.example.data.model.AuthorizationStatus.VERIFIED && auth?.explicitTestingPermitted == true -> {
+                            statusText = "ROA VERIFIED"
+                            statusColor = SeverityClean
+                        }
+                        auth?.verificationStatus == com.example.data.model.AuthorizationStatus.REVOKED -> {
+                            statusText = "ROA REVOKED"
+                            statusColor = Color(0xFFDC2626)
+                        }
+                        else -> {
+                            statusText = "ROA PENDING VERIFICATION"
+                            statusColor = Color(0xFFD97706)
+                        }
+                    }
+
                     Box(
                         modifier = Modifier
                             .padding(end = 12.dp)
                             .clip(RoundedCornerShape(6.dp))
-                            .background(if (isAuthActive) SeverityClean.copy(alpha = 0.15f) else Color(0x33EF4444))
-                            .border(1.dp, if (isAuthActive) SeverityClean.copy(alpha = 0.5f) else Color(0xFFEF4444), RoundedCornerShape(6.dp))
+                            .background(statusColor.copy(alpha = 0.15f))
+                            .border(1.dp, statusColor.copy(alpha = 0.5f), RoundedCornerShape(6.dp))
                             .padding(horizontal = 8.dp, vertical = 4.dp)
                     ) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -154,15 +178,15 @@ fun MainApp(viewModel: SentinelViewModel) {
                                 modifier = Modifier
                                     .size(6.dp)
                                     .clip(CircleShape)
-                                    .background(if (isAuthActive) SeverityClean else Color(0xFFEF4444))
+                                    .background(statusColor)
                             )
                             Spacer(modifier = Modifier.width(4.dp))
                             Text(
-                                text = if (isAuthActive) "ROA ACTIVE" else "ROA REQUIRED",
+                                text = statusText,
                                 fontSize = 10.sp,
                                 fontWeight = FontWeight.Bold,
                                 fontFamily = FontFamily.Monospace,
-                                color = if (isAuthActive) SeverityClean else Color(0xFFEF4444)
+                                color = statusColor
                             )
                         }
                     }

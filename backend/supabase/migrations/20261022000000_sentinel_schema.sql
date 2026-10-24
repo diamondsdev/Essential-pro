@@ -28,6 +28,7 @@ CREATE TABLE IF NOT EXISTS clients (
     name TEXT NOT NULL,
     organization TEXT NOT NULL,
     contact_email TEXT NOT NULL,
+    is_demo BOOLEAN NOT NULL DEFAULT false,
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -41,6 +42,7 @@ CREATE TABLE IF NOT EXISTS engagements (
     lead_assessor TEXT NOT NULL,
     status TEXT NOT NULL CHECK (status IN ('DRAFT', 'ACTIVE', 'COMPLETED', 'ARCHIVED')) DEFAULT 'ACTIVE',
     target_environment TEXT NOT NULL DEFAULT 'Production (Passive / Non-Destructive)',
+    is_demo BOOLEAN NOT NULL DEFAULT false,
     start_date TIMESTAMPTZ NOT NULL,
     end_date TIMESTAMPTZ NOT NULL,
     created_at TIMESTAMPTZ DEFAULT NOW()
@@ -57,7 +59,14 @@ CREATE TABLE IF NOT EXISTS authorizations (
     authorization_scope_summary TEXT NOT NULL,
     valid_from TIMESTAMPTZ NOT NULL,
     valid_to TIMESTAMPTZ NOT NULL,
-    explicit_testing_permitted BOOLEAN NOT NULL DEFAULT true,
+    explicit_testing_permitted BOOLEAN NOT NULL DEFAULT false, -- Strictly defaults to false!
+    verification_status TEXT NOT NULL DEFAULT 'PENDING_VERIFICATION' CHECK (verification_status IN ('PENDING_VERIFICATION', 'VERIFIED', 'EXPIRED', 'REVOKED', 'REJECTED')),
+    verified_by TEXT,
+    verified_at TIMESTAMPTZ,
+    evidence_hash TEXT,
+    revoked_at TIMESTAMPTZ,
+    revocation_reason TEXT,
+    is_demo BOOLEAN NOT NULL DEFAULT false,
     emergency_contact_phone TEXT NOT NULL,
     signed_at TIMESTAMPTZ DEFAULT NOW(),
     rules_notes TEXT DEFAULT 'Strictly non-destructive defensive checks only.'
@@ -72,6 +81,7 @@ CREATE TABLE IF NOT EXISTS approved_scopes (
     allowed_ports TEXT NOT NULL DEFAULT '80,443',
     path_prefix TEXT NOT NULL DEFAULT '/',
     active BOOLEAN NOT NULL DEFAULT true,
+    is_demo BOOLEAN NOT NULL DEFAULT false,
     added_at TIMESTAMPTZ DEFAULT NOW()
 );
 
@@ -92,13 +102,16 @@ CREATE TABLE IF NOT EXISTS assessment_jobs (
     medium_count INT DEFAULT 0,
     low_count INT DEFAULT 0,
     info_count INT DEFAULT 0,
+    checks_passed_count INT DEFAULT 0,
+    checks_failed_count INT DEFAULT 0,
+    is_demo BOOLEAN DEFAULT false,
     posture_score INT DEFAULT 100,
     posture_grade TEXT DEFAULT 'A',
     summary_notes TEXT DEFAULT '',
     error_message TEXT
 );
 
--- 7. Verified Security Findings & Evidence
+-- 7. Defensive Security Findings & Observations
 CREATE TABLE IF NOT EXISTS security_findings (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     job_id UUID REFERENCES assessment_jobs(id) ON DELETE CASCADE,
@@ -107,7 +120,9 @@ CREATE TABLE IF NOT EXISTS security_findings (
     title TEXT NOT NULL,
     severity TEXT NOT NULL CHECK (severity IN ('CRITICAL', 'HIGH', 'MEDIUM', 'LOW', 'INFORMATIONAL')),
     confidence TEXT NOT NULL DEFAULT 'CONFIRMED',
-    status TEXT NOT NULL CHECK (status IN ('VERIFIED', 'MITIGATED', 'FALSE_POSITIVE', 'ACCEPTED_RISK')) DEFAULT 'VERIFIED',
+    status TEXT NOT NULL CHECK (status IN ('AUTOMATED_OBSERVATION', 'VERIFIED', 'MITIGATED', 'FALSE_POSITIVE', 'ACCEPTED_RISK')) DEFAULT 'AUTOMATED_OBSERVATION',
+    verified_by TEXT,
+    verified_at TIMESTAMPTZ,
     cwe_id TEXT NOT NULL,
     owasp_category TEXT NOT NULL,
     summary TEXT NOT NULL,
@@ -118,7 +133,7 @@ CREATE TABLE IF NOT EXISTS security_findings (
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- 8. Immutable Audit Logs
+-- 8. Immutable, Tamper-Evident Hash-Chained Audit Logs
 CREATE TABLE IF NOT EXISTS audit_logs (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     org_id UUID REFERENCES organizations(id) ON DELETE CASCADE,
@@ -127,6 +142,7 @@ CREATE TABLE IF NOT EXISTS audit_logs (
     action TEXT NOT NULL,
     target TEXT NOT NULL,
     details TEXT NOT NULL,
+    previous_hash TEXT NOT NULL DEFAULT '0000000000000000000000000000000000000000000000000000000000000000',
     hash_signature TEXT NOT NULL
 );
 
@@ -144,11 +160,21 @@ ALTER TABLE assessment_jobs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE security_findings ENABLE ROW LEVEL SECURITY;
 ALTER TABLE audit_logs ENABLE ROW LEVEL SECURITY;
 
--- Helper function to get current user's organization
+-- Hardened helper function to get current user's organization with safe search_path
 CREATE OR REPLACE FUNCTION get_user_org_id()
 RETURNS UUID AS $$
   SELECT org_id FROM user_profiles WHERE id = auth.uid() LIMIT 1;
-$$ LANGUAGE sql STABLE SECURITY DEFINER;
+$$ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public;
+
+-- Profiles: Users can view their own profile and peers within the same org
+CREATE POLICY "Profiles viewable by org members" ON user_profiles
+    FOR SELECT USING (org_id = get_user_org_id() OR id = auth.uid());
+
+-- Profiles: Users cannot update their own role (prevents self-role elevation)
+CREATE POLICY "Admins only can update profile roles" ON user_profiles
+    FOR UPDATE USING (
+        EXISTS (SELECT 1 FROM user_profiles WHERE id = auth.uid() AND role = 'admin')
+    );
 
 -- 1. Engagements Policy (Organization Isolation)
 CREATE POLICY "Engagements are viewable by org members" ON engagements

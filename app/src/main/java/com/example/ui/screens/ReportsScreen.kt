@@ -88,6 +88,8 @@ fun ReportsScreen(
 
     var isGeneratingPdf by remember { mutableStateOf(false) }
 
+    val auditChainStatus by viewModel.auditChainStatus.collectAsState()
+
     val activeJob = selectedJob ?: recentJobs.firstOrNull()
     val dateFormat = remember { SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US) }
 
@@ -136,7 +138,7 @@ fun ReportsScreen(
                         )
                         Spacer(modifier = Modifier.height(2.dp))
                         Text(
-                            text = "Grade: ${activeJob.postureGrade} (${activeJob.postureScore}/100) • Findings: ${activeJob.totalFindingsCount}",
+                            text = "Grade: ${activeJob.postureGrade} (${activeJob.postureScore}/100) • Checks: ${activeJob.checksPassedCount} passed / ${activeJob.checksFailedCount} failed • Findings: ${activeJob.totalFindingsCount}",
                             fontSize = 12.sp,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -277,19 +279,90 @@ fun ReportsScreen(
             }
         }
 
+        // Audit Chain Integrity Verification Card
+        item {
+            Card(
+                colors = CardDefaults.cardColors(containerColor = CyberSlate900),
+                border = androidx.compose.foundation.BorderStroke(
+                    1.dp,
+                    if (auditChainStatus?.isValid == true) SeverityClean else if (auditChainStatus?.isValid == false) SeverityCritical else CyberSlate700
+                ),
+                shape = RoundedCornerShape(10.dp),
+                modifier = Modifier.fillMaxWidth().testTag("audit_chain_verification_card")
+            ) {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.Default.Shield,
+                                contentDescription = "Chain Integrity",
+                                tint = if (auditChainStatus?.isValid == true) SeverityClean else SentinelCyan,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "AUDIT CHAIN CRYPTOGRAPHIC INTEGRITY",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = if (auditChainStatus?.isValid == true) SeverityClean else SentinelCyan,
+                                letterSpacing = 1.sp
+                            )
+                        }
+
+                        OutlinedButton(
+                            onClick = { viewModel.verifyAuditChain() },
+                            modifier = Modifier.testTag("btn_verify_audit_chain")
+                        ) {
+                            Text("Verify Chain", fontSize = 11.sp)
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    if (auditChainStatus != null) {
+                        val status = auditChainStatus!!
+                        if (status.isValid) {
+                            Text(
+                                text = "CHAIN INTACT: ${status.totalEntries} entries verified. Previous-hash linkages and SHA-256 signatures are cryptographically valid.",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = SeverityClean
+                            )
+                        } else {
+                            Text(
+                                text = "TAMPERING DETECTED: Chain integrity check failed! Entry index: ${status.brokenAtIndex ?: "N/A"}. Reason: ${status.failureReason}",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = SeverityCritical
+                            )
+                        }
+                    } else {
+                        Text(
+                            text = "Each audit log entry contains a cryptographic hash signature linked to the previous entry's SHA-256 hash. Run verification to confirm the log chain is unmodified.",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+        }
+
         // Immutable Audit Trail Header
         item {
-            Spacer(modifier = Modifier.height(4.dp))
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(Icons.Default.Shield, contentDescription = "Audit", tint = SeverityClean, modifier = Modifier.size(18.dp))
+                    Icon(Icons.Default.History, contentDescription = "Audit", tint = SeverityClean, modifier = Modifier.size(18.dp))
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = "SECURITY AUDIT TRAIL (${auditLogs.size})",
+                        text = "AUDIT TRAIL RECORDS (${auditLogs.size})",
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Bold,
                         color = SeverityClean,
@@ -298,7 +371,7 @@ fun ReportsScreen(
                 }
 
                 Text(
-                    text = "Tamper-Evident SHA-256",
+                    text = "Chained SHA-256",
                     fontSize = 10.sp,
                     fontFamily = FontFamily.Monospace,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -321,8 +394,8 @@ fun AuditLogCard(
 ) {
     val actionColor = when (log.action) {
         AuditAction.SCOPE_VIOLATION_BLOCKED -> SeverityCritical
-        AuditAction.AUTHORIZATION_SIGNED, AuditAction.SCAN_COMPLETED -> SeverityClean
-        AuditAction.SCAN_CANCELLED -> SeverityMedium
+        AuditAction.AUTHORIZATION_SIGNED, AuditAction.SCAN_COMPLETED, AuditAction.INTEGRITY_CHECK_PASSED -> SeverityClean
+        AuditAction.SCAN_CANCELLED, AuditAction.INTEGRITY_CHECK_FAILED -> SeverityCritical
         else -> SentinelCyan
     }
 
@@ -380,12 +453,25 @@ fun AuditLogCard(
 
             Spacer(modifier = Modifier.height(6.dp))
 
-            Text(
-                text = log.hashSignature,
-                fontSize = 9.sp,
-                fontFamily = FontFamily.Monospace,
-                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
-            )
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(CyberSlate800.copy(alpha = 0.5f), RoundedCornerShape(4.dp))
+                    .padding(horizontal = 6.dp, vertical = 4.dp)
+            ) {
+                Text(
+                    text = "prev: ${log.previousHash.take(24)}...",
+                    fontSize = 9.sp,
+                    fontFamily = FontFamily.Monospace,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(
+                    text = "hash: ${log.hashSignature.take(24)}...",
+                    fontSize = 9.sp,
+                    fontFamily = FontFamily.Monospace,
+                    color = SentinelCyan.copy(alpha = 0.8f)
+                )
+            }
         }
     }
 }

@@ -81,12 +81,13 @@ class PdfSecurityReportGenerator(private val context: Context) {
 
         val clientName = client?.organization ?: "Authorized Client Organization"
         val engTitle = engagement?.title ?: "Web Perimeter Security Assessment"
-        val roaRef = authorization?.documentReference ?: "ROA-SIGNED-DIGITAL"
+        val roaRef = authorization?.documentReference ?: "Awaiting Signed ROA"
+        val roaStatus = authorization?.verificationStatus?.label ?: "PENDING_VERIFICATION"
         val authorizedBy = authorization?.authorizedByName ?: "Chief Information Security Officer"
 
         canvas.drawText("Client Organization: $clientName", 35f, y + 40f, paint)
         canvas.drawText("Engagement: $engTitle", 35f, y + 55f, paint)
-        canvas.drawText("Written ROA Reference: $roaRef (Explicit Consent Confirmed)", 35f, y + 70f, paint)
+        canvas.drawText("Written ROA Reference: $roaRef (Status: $roaStatus)", 35f, y + 70f, paint)
         canvas.drawText("Authorized Officer: $authorizedBy | Assessor: ${job.triggeredBy}", 35f, y + 85f, paint)
         canvas.drawText("Target Host: ${job.resolvedHost} (${job.resolvedIps})", 35f, y + 100f, paint)
 
@@ -118,12 +119,12 @@ class PdfSecurityReportGenerator(private val context: Context) {
         paint.color = Color.parseColor("#0F172A")
         paint.textSize = 10f
         paint.typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-        canvas.drawText("DEFENSIVE FINDINGS SUMMARY", 185f, y + 20f, paint)
+        canvas.drawText("CHECKS & FINDINGS SUMMARY", 185f, y + 20f, paint)
 
         paint.textSize = 9f
         paint.typeface = Typeface.DEFAULT
         paint.color = Color.parseColor("#475569")
-        val metricsText = "Critical: ${job.criticalCount}  |  High: ${job.highCount}  |  Medium: ${job.mediumCount}  |  Low: ${job.lowCount}  |  Info: ${job.infoCount}"
+        val metricsText = "Checks: ${job.checksPassedCount} Passed, ${job.checksFailedCount} Flagged | Critical: ${job.criticalCount} High: ${job.highCount} Med: ${job.mediumCount}"
         canvas.drawText(metricsText, 185f, y + 42f, paint)
         canvas.drawText("Scope: ${scopes.map { it.hostname }.joinToString(", ")}", 185f, y + 56f, paint)
 
@@ -133,7 +134,7 @@ class PdfSecurityReportGenerator(private val context: Context) {
         paint.color = Color.parseColor("#0F172A")
         paint.textSize = 13f
         paint.typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
-        canvas.drawText("VERIFIED DEFENSIVE FINDINGS & EVIDENCE (${findings.size})", 25f, y, paint)
+        canvas.drawText("DEFENSIVE FINDINGS & OBSERVATIONS (${findings.size})", 25f, y, paint)
         y += 18f
 
         // Loop findings (fit page 1 or create subsequent pages if needed)

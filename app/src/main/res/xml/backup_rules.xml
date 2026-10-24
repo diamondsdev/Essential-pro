@@ -6,8 +6,8 @@
    See https://developer.android.com/about/versions/12/backup-restore
 -->
 <full-backup-content>
-    <!--
-   <include domain="sharedpref" path="."/>
-   <exclude domain="sharedpref" path="device.xml"/>
--->
+    <!-- Exclude sensitive security audit records, credentials, and hash chain database from cloud backup -->
+    <exclude domain="database" path="sentinel_security_db"/>
+    <exclude domain="database" path="sentinel_security_db-shm"/>
+    <exclude domain="database" path="sentinel_security_db-wal"/>
 </full-backup-content>

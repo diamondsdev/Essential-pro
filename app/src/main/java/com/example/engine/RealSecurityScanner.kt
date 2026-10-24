@@ -21,9 +21,12 @@ import kotlinx.coroutines.withContext
 import okhttp3.Dns
 import okhttp3.EventListener
 import okhttp3.Handshake
+import okhttp3.Interceptor
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.Response
 import org.json.JSONObject
+import java.io.IOException
 import java.net.InetAddress
 import java.net.URI
 import java.security.cert.X509Certificate
@@ -35,6 +38,23 @@ sealed class ScanStepStatus {
     data class StepComplete(val step: String, val findingsFoundSoFar: Int) : ScanStepStatus()
     data class ScanFinished(val job: AssessmentJobEntity, val findings: List<SecurityFindingEntity>) : ScanStepStatus()
     data class ScanFailed(val error: String) : ScanStepStatus()
+}
+
+/**
+ * Custom OkHttp DNS implementation that pins lookups strictly to pre-validated IP addresses.
+ * Completely eliminates DNS-rebinding / TOCTOU SSRF attacks at the socket layer.
+ */
+class PinnedDns(
+    private val expectedHost: String,
+    private val validatedAddresses: List<InetAddress>
+) : Dns {
+    override fun lookup(hostname: String): List<InetAddress> {
+        if (hostname.equals(expectedHost, ignoreCase = true)) {
+            return validatedAddresses
+        }
+        // Fail-closed for any unpinned hostname
+        throw IOException("DNS lookup prohibited for unpinned host '$hostname'")
+    }
 }
 
 class RealSecurityScanner(
@@ -66,7 +86,7 @@ class RealSecurityScanner(
 
         val allowed = scopeResult as ScopeEnforcementResult.Allowed
         val hostname = allowed.normalizedHost
-        val resolvedIps = allowed.resolvedIps.joinToString(", ")
+        val resolvedIps = allowed.validatedAddresses.joinToString(", ") { it.hostAddress }
         val jobId = UUID.randomUUID().toString()
 
         val initialJob = AssessmentJobEntity(
@@ -77,7 +97,8 @@ class RealSecurityScanner(
             resolvedIps = resolvedIps,
             status = "RUNNING",
             triggeredBy = assessorName,
-            startedAt = System.currentTimeMillis()
+            startedAt = System.currentTimeMillis(),
+            isDemo = authorization?.isDemo ?: false
         )
         repository.insertJob(initialJob)
         repository.recordAuditLog(
@@ -88,23 +109,68 @@ class RealSecurityScanner(
         )
 
         val collectedFindings = mutableListOf<SecurityFindingEntity>()
+        var checksPassed = 0
+        var checksFailed = 0
+
+        // Build Pinned HttpClient to prevent DNS-rebinding
+        val pinnedDns = PinnedDns(hostname, allowed.validatedAddresses)
+
+        // Redirect-Interception: Validates all redirect targets against scope
+        val redirectInterceptor = Interceptor { chain ->
+            val request = chain.request()
+            val response = chain.proceed(request)
+            if (response.isRedirect) {
+                val location = response.header("Location")
+                if (location != null) {
+                    val resolvedRedirectUri = try {
+                        request.url.toUri().resolve(location)
+                    } catch (_: Exception) {
+                        null
+                    }
+                    if (resolvedRedirectUri != null) {
+                        val redHost = resolvedRedirectUri.host?.lowercase()?.trimEnd('.')
+                        if (redHost != hostname) {
+                            // Check if redirect host is authorized in active scopes
+                            val isAuthRedirect = activeScopes.any { s ->
+                                s.active && (if (s.wildcardAllowed) redHost == s.hostname || redHost?.endsWith(".${s.hostname}") == true else redHost == s.hostname)
+                            }
+                            if (!isAuthRedirect) {
+                                throw IOException("Prohibited cross-host redirect to unapproved destination: $resolvedRedirectUri")
+                            }
+                        }
+                    }
+                }
+            }
+            response
+        }
+
+        val pinnedClient = OkHttpClient.Builder()
+            .dns(pinnedDns)
+            .addInterceptor(redirectInterceptor)
+            .connectTimeout(6, TimeUnit.SECONDS)
+            .readTimeout(6, TimeUnit.SECONDS)
+            .callTimeout(10, TimeUnit.SECONDS)
+            .followRedirects(false) // Handle redirects safely with policy
+            .build()
 
         try {
             currentCoroutineContext().ensureActive()
 
-            // Phase 2: DNS Resolution & Passive SPF/DMARC Email Security Audit
-            emit(ScanStepStatus.Progress("2. DNS & Domain Checks", 0.20f, "Querying A, AAAA, SPF, and DMARC records for $hostname..."))
-            val dnsFindings = auditDns(hostname, jobId, engagementId)
+            // Phase 2: DNS Resolution, A/AAAA validation, and Passive SPF/DMARC Email Security Audit
+            emit(ScanStepStatus.Progress("2. DNS & Domain Checks", 0.20f, "Auditing A/AAAA resolutions, SPF, and DMARC for $hostname..."))
+            val (dnsFindings, dnsSuccess) = auditDns(hostname, allowed.validatedAddresses, jobId, engagementId)
             collectedFindings.addAll(dnsFindings)
+            if (dnsSuccess) checksPassed++ else checksFailed++
             emit(ScanStepStatus.StepComplete("DNS Checks", collectedFindings.size))
 
             currentCoroutineContext().ensureActive()
-            delay(300) // Rate limit pause
+            delay(300) // Rate-limiting delay
 
             // Phase 3: TLS Handshake & Certificate Verification
             emit(ScanStepStatus.Progress("3. TLS & Cryptography", 0.40f, "Inspecting TLS handshake, cipher suites, and X.509 cert chain..."))
-            val tlsFindings = auditTls(hostname, jobId, engagementId)
+            val (tlsFindings, tlsSuccess) = auditTls(hostname, pinnedClient, jobId, engagementId)
             collectedFindings.addAll(tlsFindings)
+            if (tlsSuccess) checksPassed++ else checksFailed++
             emit(ScanStepStatus.StepComplete("TLS Cryptography Checks", collectedFindings.size))
 
             currentCoroutineContext().ensureActive()
@@ -112,8 +178,9 @@ class RealSecurityScanner(
 
             // Phase 4: HTTP Security Headers & Cookie Flags
             emit(ScanStepStatus.Progress("4. HTTP Headers & Cookies", 0.60f, "Auditing HSTS, CSP, X-Frame-Options, and Set-Cookie flags..."))
-            val headerFindings = auditHttpHeadersAndCookies(hostname, jobId, engagementId)
+            val (headerFindings, headerSuccess) = auditHttpHeadersAndCookies(hostname, pinnedClient, jobId, engagementId)
             collectedFindings.addAll(headerFindings)
+            if (headerSuccess) checksPassed++ else checksFailed++
             emit(ScanStepStatus.StepComplete("Header & Cookie Audits", collectedFindings.size))
 
             currentCoroutineContext().ensureActive()
@@ -121,8 +188,9 @@ class RealSecurityScanner(
 
             // Phase 5: HTTPS Redirection & Downgrade Resistance
             emit(ScanStepStatus.Progress("5. Redirect Checks", 0.75f, "Testing plain HTTP to HTTPS auto-redirection on port 80..."))
-            val redirectFindings = auditHttpsRedirect(hostname, jobId, engagementId)
+            val (redirectFindings, redirectSuccess) = auditHttpsRedirect(hostname, pinnedClient, jobId, engagementId)
             collectedFindings.addAll(redirectFindings)
+            if (redirectSuccess) checksPassed++ else checksFailed++
             emit(ScanStepStatus.StepComplete("Redirect Checks", collectedFindings.size))
 
             currentCoroutineContext().ensureActive()
@@ -130,11 +198,12 @@ class RealSecurityScanner(
 
             // Phase 6: Public Security Metadata (RFC 9116 security.txt & robots.txt)
             emit(ScanStepStatus.Progress("6. Public Metadata", 0.88f, "Auditing RFC 9116 security.txt and robots.txt disclosures..."))
-            val metadataFindings = auditPublicFiles(hostname, jobId, engagementId)
+            val (metadataFindings, metaSuccess) = auditPublicFiles(hostname, pinnedClient, jobId, engagementId)
             collectedFindings.addAll(metadataFindings)
+            if (metaSuccess) checksPassed++ else checksFailed++
             emit(ScanStepStatus.StepComplete("Public Metadata Checks", collectedFindings.size))
 
-            // Calculate Scoring & Grade
+            // Calculate Scoring & Grade with incomplete check penalty
             var score = 100
             var critical = 0
             var high = 0
@@ -151,8 +220,16 @@ class RealSecurityScanner(
                     Severity.INFORMATIONAL -> { info++ }
                 }
             }
+
+            // Penalty for incomplete/failed checks so an errored scan never gets 100% "A+"
+            if (checksFailed > 0) {
+                score -= (checksFailed * 10)
+            }
             score = score.coerceIn(0, 100)
+
+            val finalStatus = if (checksFailed >= 3) "INCOMPLETE" else "COMPLETED"
             val grade = when {
+                finalStatus == "INCOMPLETE" -> "INC"
                 score >= 95 -> "A+"
                 score >= 90 -> "A"
                 score >= 80 -> "B"
@@ -162,7 +239,7 @@ class RealSecurityScanner(
             }
 
             val finalJob = initialJob.copy(
-                status = "COMPLETED",
+                status = finalStatus,
                 completedAt = System.currentTimeMillis(),
                 totalFindingsCount = collectedFindings.size,
                 criticalCount = critical,
@@ -170,9 +247,13 @@ class RealSecurityScanner(
                 mediumCount = medium,
                 lowCount = low,
                 infoCount = info,
+                checksPassedCount = checksPassed,
+                checksFailedCount = checksFailed,
                 postureScore = score,
                 postureGrade = grade,
-                summaryNotes = "Passive defensive assessment executed against authorized host $hostname. Identified ${collectedFindings.size} verified findings."
+                summaryNotes = "Defensive assessment completed against authorized host $hostname. " +
+                        "$checksPassed checks executed cleanly, $checksFailed checks had errors. " +
+                        "${collectedFindings.size} observations recorded."
             )
 
             // Persist job and findings to Room database
@@ -184,7 +265,7 @@ class RealSecurityScanner(
                 action = AuditAction.SCAN_COMPLETED,
                 actor = assessorName,
                 target = hostname,
-                details = "Assessment completed. Score: $score ($grade). Total Findings: ${collectedFindings.size}"
+                details = "Assessment finished ($finalStatus). Score: $score ($grade). Observations: ${collectedFindings.size}. Passed: $checksPassed, Failed: $checksFailed"
             )
 
             emit(ScanStepStatus.Progress("Finalizing Report", 1.0f, "Completed successfully."))
@@ -207,26 +288,32 @@ class RealSecurityScanner(
         }
     }.flowOn(Dispatchers.IO)
 
-    // Sub-engine 1: DNS Auditing (Local resolution + DoH for TXT / DMARC)
-    private suspend fun auditDns(hostname: String, jobId: String, engagementId: String): List<SecurityFindingEntity> = withContext(Dispatchers.IO) {
+    // Sub-engine 1: DNS Auditing
+    private suspend fun auditDns(
+        hostname: String,
+        resolvedAddresses: List<InetAddress>,
+        jobId: String,
+        engagementId: String
+    ): Pair<List<SecurityFindingEntity>, Boolean> = withContext(Dispatchers.IO) {
         val findings = mutableListOf<SecurityFindingEntity>()
+        var success = true
         val baseDomain = extractBaseDomain(hostname)
 
         val txtRecords = mutableListOf<String>()
         val dmarcRecords = mutableListOf<String>()
 
-        val client = OkHttpClient.Builder()
+        val dohClient = OkHttpClient.Builder()
             .connectTimeout(5, TimeUnit.SECONDS)
             .readTimeout(5, TimeUnit.SECONDS)
             .build()
 
-        // Query Cloudflare / Google DoH for TXT records passively
+        // 1. Query Cloudflare DoH for TXT records passively
         try {
             val txtReq = Request.Builder()
                 .url("https://cloudflare-dns.com/dns-query?name=$baseDomain&type=TXT")
                 .header("Accept", "application/dns-json")
                 .build()
-            client.newCall(txtReq).execute().use { resp ->
+            dohClient.newCall(txtReq).execute().use { resp ->
                 if (resp.isSuccessful) {
                     val body = resp.body?.string() ?: ""
                     val json = JSONObject(body)
@@ -239,15 +326,17 @@ class RealSecurityScanner(
                     }
                 }
             }
-        } catch (_: Exception) {}
+        } catch (_: Exception) {
+            success = false
+        }
 
-        // Query _dmarc.<baseDomain> for DMARC record
+        // 2. Query _dmarc.<baseDomain> for DMARC record
         try {
             val dmarcReq = Request.Builder()
                 .url("https://cloudflare-dns.com/dns-query?name=_dmarc.$baseDomain&type=TXT")
                 .header("Accept", "application/dns-json")
                 .build()
-            client.newCall(dmarcReq).execute().use { resp ->
+            dohClient.newCall(dmarcReq).execute().use { resp ->
                 if (resp.isSuccessful) {
                     val body = resp.body?.string() ?: ""
                     val json = JSONObject(body)
@@ -260,20 +349,26 @@ class RealSecurityScanner(
                     }
                 }
             }
-        } catch (_: Exception) {}
+        } catch (_: Exception) {
+            success = false
+        }
 
         findings.addAll(DefensiveChecks.checkDnsSpfAndDmarc(txtRecords, dmarcRecords, jobId, engagementId))
-        findings
+        findings to success
     }
 
-    // Sub-engine 2: TLS & Cryptography Handshake
-    private suspend fun auditTls(hostname: String, jobId: String, engagementId: String): List<SecurityFindingEntity> = withContext(Dispatchers.IO) {
+    // Sub-engine 2: TLS Handshake & Certificate Verification
+    private suspend fun auditTls(
+        hostname: String,
+        pinnedClient: OkHttpClient,
+        jobId: String,
+        engagementId: String
+    ): Pair<List<SecurityFindingEntity>, Boolean> = withContext(Dispatchers.IO) {
         val findings = mutableListOf<SecurityFindingEntity>()
+        var success = false
         var capturedHandshake: Handshake? = null
 
-        val client = OkHttpClient.Builder()
-            .connectTimeout(7, TimeUnit.SECONDS)
-            .readTimeout(7, TimeUnit.SECONDS)
+        val client = pinnedClient.newBuilder()
             .eventListener(object : EventListener() {
                 override fun secureConnectEnd(call: okhttp3.Call, handshake: Handshake?) {
                     capturedHandshake = handshake
@@ -305,12 +400,13 @@ class RealSecurityScanner(
                                 engagementId = engagementId
                             )
                         )
+                        success = true
                     }
                 }
             }
         } catch (e: Exception) {
-            // If SSL handshake completely fails, record critical finding
-            if (e.message?.contains("CertPathValidatorException") == true || e.message?.contains("SSLHandshakeException") == true) {
+            if (e.message?.contains("CertPathValidatorException") == true ||
+                e.message?.contains("SSLHandshakeException") == true) {
                 findings.add(
                     SecurityFindingEntity(
                         id = UUID.randomUUID().toString(),
@@ -320,7 +416,7 @@ class RealSecurityScanner(
                         title = "Untrusted or Invalid SSL/TLS Certificate",
                         severity = Severity.CRITICAL,
                         confidence = Confidence.CONFIRMED,
-                        status = FindingStatus.VERIFIED,
+                        status = FindingStatus.AUTOMATED_OBSERVATION,
                         cweId = "CWE-295",
                         owaspCategory = "A02:2021-Cryptographic Failures",
                         summary = "The TLS connection failed certificate validation: ${e.message}",
@@ -329,20 +425,24 @@ class RealSecurityScanner(
                         remediationGuidance = "Deploy a valid certificate issued by a recognized public CA (e.g., Let's Encrypt, DigiCert)."
                     )
                 )
+                success = true
+            } else {
+                success = false
             }
         }
 
-        findings
+        findings to success
     }
 
     // Sub-engine 3: HTTP Headers & Cookie Security Flags
-    private suspend fun auditHttpHeadersAndCookies(hostname: String, jobId: String, engagementId: String): List<SecurityFindingEntity> = withContext(Dispatchers.IO) {
+    private suspend fun auditHttpHeadersAndCookies(
+        hostname: String,
+        pinnedClient: OkHttpClient,
+        jobId: String,
+        engagementId: String
+    ): Pair<List<SecurityFindingEntity>, Boolean> = withContext(Dispatchers.IO) {
         val findings = mutableListOf<SecurityFindingEntity>()
-        val client = OkHttpClient.Builder()
-            .connectTimeout(7, TimeUnit.SECONDS)
-            .readTimeout(7, TimeUnit.SECONDS)
-            .followRedirects(true)
-            .build()
+        var success = false
 
         try {
             val request = Request.Builder()
@@ -350,7 +450,7 @@ class RealSecurityScanner(
                 .header("User-Agent", "Sentinel-Pro-Defensive-Auditor/1.0")
                 .build()
 
-            client.newCall(request).execute().use { resp ->
+            pinnedClient.newCall(request).execute().use { resp ->
                 val headersMap = mutableMapOf<String, String>()
                 for (name in resp.headers.names()) {
                     headersMap[name] = resp.header(name) ?: ""
@@ -367,20 +467,24 @@ class RealSecurityScanner(
                 // Cookie checks
                 val cookies = resp.headers("Set-Cookie")
                 findings.addAll(DefensiveChecks.checkCookies(cookies, true, jobId, engagementId))
+                success = true
             }
-        } catch (_: Exception) {}
+        } catch (_: Exception) {
+            success = false
+        }
 
-        findings
+        findings to success
     }
 
     // Sub-engine 4: HTTPS Redirection Check
-    private suspend fun auditHttpsRedirect(hostname: String, jobId: String, engagementId: String): List<SecurityFindingEntity> = withContext(Dispatchers.IO) {
+    private suspend fun auditHttpsRedirect(
+        hostname: String,
+        pinnedClient: OkHttpClient,
+        jobId: String,
+        engagementId: String
+    ): Pair<List<SecurityFindingEntity>, Boolean> = withContext(Dispatchers.IO) {
         val findings = mutableListOf<SecurityFindingEntity>()
-        val client = OkHttpClient.Builder()
-            .connectTimeout(6, TimeUnit.SECONDS)
-            .readTimeout(6, TimeUnit.SECONDS)
-            .followRedirects(false) // Do NOT follow automatically, inspect status
-            .build()
+        var success = false
 
         try {
             val request = Request.Builder()
@@ -388,12 +492,13 @@ class RealSecurityScanner(
                 .header("User-Agent", "Sentinel-Pro-Defensive-Auditor/1.0")
                 .build()
 
-            client.newCall(request).execute().use { resp ->
+            pinnedClient.newCall(request).execute().use { resp ->
                 val statusCode = resp.code
                 val location = resp.header("Location") ?: ""
 
                 if (statusCode in 300..399 && location.startsWith("https://", ignoreCase = true)) {
-                    // Valid HTTPS redirect established!
+                    // Valid HTTPS redirect established
+                    success = true
                 } else if (statusCode == 200) {
                     findings.add(
                         SecurityFindingEntity(
@@ -404,7 +509,7 @@ class RealSecurityScanner(
                             title = "Plain HTTP Service Accessible Without HTTPS Redirect",
                             severity = Severity.HIGH,
                             confidence = Confidence.CONFIRMED,
-                            status = FindingStatus.VERIFIED,
+                            status = FindingStatus.AUTOMATED_OBSERVATION,
                             cweId = "CWE-319",
                             owaspCategory = "A02:2021-Cryptographic Failures",
                             summary = "Connecting to http://$hostname returns HTTP $statusCode without redirecting to https://.",
@@ -414,22 +519,28 @@ class RealSecurityScanner(
                             verificationCurl = "curl -sI http://$hostname"
                         )
                     )
+                    success = true
+                } else {
+                    success = true
                 }
             }
         } catch (_: Exception) {
-            // Port 80 closed is also secure against unencrypted traffic
+            // Port 80 connection refused / closed is securely non-plaintext
+            success = true
         }
 
-        findings
+        findings to success
     }
 
-    // Sub-engine 5: Rate-Limited Public Metadata Inspection
-    private suspend fun auditPublicFiles(hostname: String, jobId: String, engagementId: String): List<SecurityFindingEntity> = withContext(Dispatchers.IO) {
+    // Sub-engine 5: Rate-Limited Public Metadata Inspection (security.txt and robots.txt)
+    private suspend fun auditPublicFiles(
+        hostname: String,
+        pinnedClient: OkHttpClient,
+        jobId: String,
+        engagementId: String
+    ): Pair<List<SecurityFindingEntity>, Boolean> = withContext(Dispatchers.IO) {
         val findings = mutableListOf<SecurityFindingEntity>()
-        val client = OkHttpClient.Builder()
-            .connectTimeout(5, TimeUnit.SECONDS)
-            .readTimeout(5, TimeUnit.SECONDS)
-            .build()
+        var success = true
 
         // 1. Check RFC 9116 security.txt
         var hasSecurityTxt = false
@@ -439,9 +550,9 @@ class RealSecurityScanner(
                     .url("https://$hostname$path")
                     .header("User-Agent", "Sentinel-Pro-Defensive-Auditor/1.0")
                     .build()
-                client.newCall(req).execute().use { resp ->
+                pinnedClient.newCall(req).execute().use { resp ->
                     if (resp.isSuccessful) {
-                        val body = resp.body?.string() ?: ""
+                        val body = resp.body?.string()?.take(4096) ?: ""
                         if (body.contains("Contact:", ignoreCase = true)) {
                             hasSecurityTxt = true
                         }
@@ -461,7 +572,7 @@ class RealSecurityScanner(
                     title = "Missing RFC 9116 Vulnerability Disclosure Policy (security.txt)",
                     severity = Severity.INFORMATIONAL,
                     confidence = Confidence.CONFIRMED,
-                    status = FindingStatus.VERIFIED,
+                    status = FindingStatus.AUTOMATED_OBSERVATION,
                     cweId = "CWE-16",
                     owaspCategory = "A05:2021-Security Misconfiguration",
                     summary = "No RFC 9116 security.txt file located at /.well-known/security.txt. Security researchers have no standardized protocol to report discovered vulnerabilities.",
@@ -473,15 +584,79 @@ class RealSecurityScanner(
             )
         }
 
-        findings
+        // 2. Check robots.txt for sensitive path disclosure
+        try {
+            val req = Request.Builder()
+                .url("https://$hostname/robots.txt")
+                .header("User-Agent", "Sentinel-Pro-Defensive-Auditor/1.0")
+                .build()
+            pinnedClient.newCall(req).execute().use { resp ->
+                if (resp.isSuccessful) {
+                    val body = resp.body?.string()?.take(8192) ?: ""
+                    val sensitiveKeywords = listOf("/admin", "/backup", "/private", "/internal", "/.git", "/config", "/db")
+                    val exposedPaths = mutableListOf<String>()
+
+                    body.lines().forEach { line ->
+                        val trimmed = line.trim()
+                        if (trimmed.startsWith("Disallow:", ignoreCase = true)) {
+                            val path = trimmed.substringAfter(":").trim()
+                            if (sensitiveKeywords.any { path.contains(it, ignoreCase = true) }) {
+                                exposedPaths.add(path)
+                            }
+                        }
+                    }
+
+                    if (exposedPaths.isNotEmpty()) {
+                        findings.add(
+                            SecurityFindingEntity(
+                                id = UUID.randomUUID().toString(),
+                                jobId = jobId,
+                                engagementId = engagementId,
+                                category = FindingCategory.PUBLIC_FILES,
+                                title = "Sensitive Administrative Path Disclosed in robots.txt",
+                                severity = Severity.LOW,
+                                confidence = Confidence.CONFIRMED,
+                                status = FindingStatus.AUTOMATED_OBSERVATION,
+                                cweId = "CWE-200",
+                                owaspCategory = "A05:2021-Security Misconfiguration",
+                                summary = "The robots.txt file contains Disallow rules referencing potentially sensitive administrative or backup paths.",
+                                technicalEvidence = "Exposed paths in robots.txt:\n${exposedPaths.take(5).joinToString("\n")}",
+                                impact = "Attackers can enumerate hidden endpoints and administrative interfaces directly from publicly accessible search engine directives.",
+                                remediationGuidance = "Protect administrative interfaces with authentication and access controls instead of relying on robots.txt for obscurity. Remove sensitive path names from robots.txt.",
+                                verificationCurl = "curl -s https://$hostname/robots.txt"
+                            )
+                        )
+                    }
+                }
+            }
+        } catch (_: Exception) {}
+
+        findings to success
     }
 
-    private fun extractBaseDomain(host: String): String {
-        val parts = host.split(".")
-        return if (parts.size >= 2) {
-            "${parts[parts.size - 2]}.${parts[parts.size - 1]}"
+    /**
+     * Public suffix aware base domain extraction.
+     * Correctly handles multi-part TLDs (.co.uk, .com.au, .gov.uk, etc.)
+     */
+    fun extractBaseDomain(host: String): String {
+        val parts = host.lowercase().trimEnd('.').split(".")
+        if (parts.size <= 2) return host
+
+        val multiPartSuffixes = setOf(
+            "co.uk", "org.uk", "gov.uk", "ac.uk", "me.uk",
+            "com.au", "net.au", "org.au", "edu.au", "gov.au",
+            "co.nz", "net.nz", "org.nz", "govt.nz",
+            "com.br", "org.br", "gov.br",
+            "co.jp", "ne.jp", "ac.jp",
+            "co.in", "net.in", "org.in", "gen.in",
+            "co.za", "org.za", "web.za"
+        )
+
+        val lastTwo = "${parts[parts.size - 2]}.${parts[parts.size - 1]}"
+        return if (multiPartSuffixes.contains(lastTwo) && parts.size >= 3) {
+            "${parts[parts.size - 3]}.${parts[parts.size - 2]}.${parts[parts.size - 1]}"
         } else {
-            host
+            lastTwo
         }
     }
 }

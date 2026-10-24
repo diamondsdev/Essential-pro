@@ -2,6 +2,8 @@ package com.example.data.local
 
 import androidx.room.TypeConverter
 import com.example.data.model.AuditAction
+import com.example.data.model.AuthorizationStatus
+import com.example.data.model.CheckResultStatus
 import com.example.data.model.Confidence
 import com.example.data.model.EngagementStatus
 import com.example.data.model.FindingCategory
@@ -25,7 +27,7 @@ class Converters {
     fun fromFindingStatus(value: FindingStatus): String = value.name
 
     @TypeConverter
-    fun toFindingStatus(value: String): FindingStatus = runCatching { FindingStatus.valueOf(value) }.getOrDefault(FindingStatus.VERIFIED)
+    fun toFindingStatus(value: String): FindingStatus = runCatching { FindingStatus.valueOf(value) }.getOrDefault(FindingStatus.AUTOMATED_OBSERVATION)
 
     @TypeConverter
     fun fromFindingCategory(value: FindingCategory): String = value.name
@@ -44,4 +46,16 @@ class Converters {
 
     @TypeConverter
     fun toAuditAction(value: String): AuditAction = runCatching { AuditAction.valueOf(value) }.getOrDefault(AuditAction.SCAN_INITIATED)
+
+    @TypeConverter
+    fun fromAuthorizationStatus(value: AuthorizationStatus): String = value.name
+
+    @TypeConverter
+    fun toAuthorizationStatus(value: String): AuthorizationStatus = runCatching { AuthorizationStatus.valueOf(value) }.getOrDefault(AuthorizationStatus.PENDING_VERIFICATION)
+
+    @TypeConverter
+    fun fromCheckResultStatus(value: CheckResultStatus): String = value.name
+
+    @TypeConverter
+    fun toCheckResultStatus(value: String): CheckResultStatus = runCatching { CheckResultStatus.valueOf(value) }.getOrDefault(CheckResultStatus.PASS)
 }

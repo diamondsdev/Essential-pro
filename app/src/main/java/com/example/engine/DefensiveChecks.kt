@@ -23,10 +23,10 @@ object DefensiveChecks {
                 title = "Missing HTTP Strict Transport Security (HSTS) Header",
                 severity = Severity.HIGH,
                 confidence = Confidence.CONFIRMED,
-                status = FindingStatus.VERIFIED,
+                status = FindingStatus.AUTOMATED_OBSERVATION,
                 cweId = "CWE-319",
                 owaspCategory = "A05:2021-Security Misconfiguration",
-                summary = "The web application does not enforce HTTPS via the Strict-Transport-Security header, allowing potential SSL-stripping and man-in-the-middle downgrade attacks.",
+                summary = "The web application does not return a Strict-Transport-Security header, allowing potential SSL-stripping and downgrade attacks.",
                 technicalEvidence = "HTTP Response Headers:\nStrict-Transport-Security: [NOT PRESENT]",
                 impact = "An attacker in the network path can intercept plain HTTP traffic and strip HTTPS redirects before encryption is established.",
                 remediationGuidance = "Configure web server to return: 'Strict-Transport-Security: max-age=31536000; includeSubDomains; preload'",
@@ -44,7 +44,7 @@ object DefensiveChecks {
                     title = "Sub-optimal HSTS Configuration (Short max-age or Missing SubDomains)",
                     severity = Severity.LOW,
                     confidence = Confidence.CONFIRMED,
-                    status = FindingStatus.VERIFIED,
+                    status = FindingStatus.AUTOMATED_OBSERVATION,
                     cweId = "CWE-319",
                     owaspCategory = "A05:2021-Security Misconfiguration",
                     summary = "The HSTS header duration is less than 6 months (15552000s) or does not include subdomains, reducing protection across perimeter subdomains.",
@@ -69,7 +69,7 @@ object DefensiveChecks {
                 title = "Missing Content Security Policy (CSP)",
                 severity = Severity.MEDIUM,
                 confidence = Confidence.CONFIRMED,
-                status = FindingStatus.VERIFIED,
+                status = FindingStatus.AUTOMATED_OBSERVATION,
                 cweId = "CWE-1021",
                 owaspCategory = "A03:2021-Injection",
                 summary = "Content-Security-Policy header is absent. Browsers will execute any script sources without restriction, increasing the severity of cross-site scripting (XSS) vectors.",
@@ -87,7 +87,7 @@ object DefensiveChecks {
                 title = "Insecure CSP Directives ('unsafe-inline' / 'unsafe-eval')",
                 severity = Severity.LOW,
                 confidence = Confidence.CONFIRMED,
-                status = FindingStatus.VERIFIED,
+                status = FindingStatus.AUTOMATED_OBSERVATION,
                 cweId = "CWE-1021",
                 owaspCategory = "A05:2021-Security Misconfiguration",
                 summary = "The Content Security Policy allows unsafe inline execution or eval(), weakening resistance against XSS.",
@@ -114,7 +114,7 @@ object DefensiveChecks {
                 title = "Missing Anti-Clickjacking Protection (X-Frame-Options)",
                 severity = Severity.MEDIUM,
                 confidence = Confidence.CONFIRMED,
-                status = FindingStatus.VERIFIED,
+                status = FindingStatus.AUTOMATED_OBSERVATION,
                 cweId = "CWE-1021",
                 owaspCategory = "A05:2021-Security Misconfiguration",
                 summary = "The site does not restrict framing via X-Frame-Options or CSP frame-ancestors, exposing users to UI-redirection / Clickjacking attacks.",
@@ -138,7 +138,7 @@ object DefensiveChecks {
                 title = "Missing MIME-Sniffing Defense (X-Content-Type-Options)",
                 severity = Severity.LOW,
                 confidence = Confidence.CONFIRMED,
-                status = FindingStatus.VERIFIED,
+                status = FindingStatus.AUTOMATED_OBSERVATION,
                 cweId = "CWE-16",
                 owaspCategory = "A05:2021-Security Misconfiguration",
                 summary = "Missing 'X-Content-Type-Options: nosniff'. Legacy browsers may interpret non-executable MIME types (e.g. images, text) as HTML or JavaScript.",
@@ -162,7 +162,7 @@ object DefensiveChecks {
                 title = "Sub-optimal or Missing Referrer-Policy",
                 severity = Severity.LOW,
                 confidence = Confidence.CONFIRMED,
-                status = FindingStatus.VERIFIED,
+                status = FindingStatus.AUTOMATED_OBSERVATION,
                 cweId = "CWE-200",
                 owaspCategory = "A01:2021-Broken Access Control",
                 summary = "The Referrer-Policy header is absent or insecure, which may leak query parameters or sensitive URLs to third-party domains.",
@@ -196,7 +196,7 @@ object DefensiveChecks {
                 title = "Technology Stack & Detailed Version Banner Disclosure",
                 severity = Severity.LOW,
                 confidence = Confidence.CONFIRMED,
-                status = FindingStatus.VERIFIED,
+                status = FindingStatus.AUTOMATED_OBSERVATION,
                 cweId = "CWE-200",
                 owaspCategory = "A05:2021-Security Misconfiguration",
                 summary = "Server banners expose internal web server, framework, or runtime versions in HTTP response headers.",
@@ -209,13 +209,23 @@ object DefensiveChecks {
         return null
     }
 
+    /**
+     * Accurately parses cookie attributes without substring false positives.
+     */
     fun checkCookies(cookieHeaders: List<String>, isHttps: Boolean, jobId: String, engagementId: String): List<SecurityFindingEntity> {
         val findings = mutableListOf<SecurityFindingEntity>()
         for (cookie in cookieHeaders) {
-            val cookieName = cookie.substringBefore("=").trim()
-            val hasSecure = cookie.contains("Secure", ignoreCase = true)
-            val hasHttpOnly = cookie.contains("HttpOnly", ignoreCase = true)
-            val hasSameSite = cookie.contains("SameSite", ignoreCase = true)
+            val parts = cookie.split(";").map { it.trim() }
+            if (parts.isEmpty()) continue
+
+            val cookieNameValue = parts[0]
+            val cookieName = cookieNameValue.substringBefore("=").trim()
+            val attributes = parts.drop(1)
+
+            // Accurate attribute detection
+            val hasSecure = attributes.any { it.equals("Secure", ignoreCase = true) }
+            val hasHttpOnly = attributes.any { it.equals("HttpOnly", ignoreCase = true) }
+            val sameSitePart = attributes.firstOrNull { it.startsWith("SameSite", ignoreCase = true) }
 
             if (isHttps && !hasSecure) {
                 findings.add(
@@ -227,7 +237,7 @@ object DefensiveChecks {
                         title = "Cookie Missing 'Secure' Flag: $cookieName",
                         severity = Severity.MEDIUM,
                         confidence = Confidence.CONFIRMED,
-                        status = FindingStatus.VERIFIED,
+                        status = FindingStatus.AUTOMATED_OBSERVATION,
                         cweId = "CWE-614",
                         owaspCategory = "A05:2021-Security Misconfiguration",
                         summary = "The cookie '$cookieName' was set without the 'Secure' attribute over an HTTPS channel.",
@@ -249,7 +259,7 @@ object DefensiveChecks {
                         title = "Session Cookie Missing 'HttpOnly' Attribute: $cookieName",
                         severity = Severity.HIGH,
                         confidence = Confidence.CONFIRMED,
-                        status = FindingStatus.VERIFIED,
+                        status = FindingStatus.AUTOMATED_OBSERVATION,
                         cweId = "CWE-1004",
                         owaspCategory = "A07:2021-Identification and Authentication Failures",
                         summary = "Authentication or session token '$cookieName' lacks the HttpOnly flag, permitting access from client-side JavaScript.",
@@ -261,7 +271,7 @@ object DefensiveChecks {
                 )
             }
 
-            if (!hasSameSite) {
+            if (sameSitePart == null || sameSitePart.equals("SameSite=None", ignoreCase = true)) {
                 findings.add(
                     SecurityFindingEntity(
                         id = UUID.randomUUID().toString(),
@@ -271,10 +281,10 @@ object DefensiveChecks {
                         title = "Cookie Missing 'SameSite' Attribute: $cookieName",
                         severity = Severity.LOW,
                         confidence = Confidence.CONFIRMED,
-                        status = FindingStatus.VERIFIED,
+                        status = FindingStatus.AUTOMATED_OBSERVATION,
                         cweId = "CWE-352",
                         owaspCategory = "A01:2021-Broken Access Control",
-                        summary = "The cookie '$cookieName' does not specify a SameSite attribute (Strict or Lax).",
+                        summary = "The cookie '$cookieName' does not specify a protective SameSite attribute (Strict or Lax).",
                         technicalEvidence = "Set-Cookie: $cookie",
                         impact = "Increases attack surface for Cross-Site Request Forgery (CSRF).",
                         remediationGuidance = "Append '; SameSite=Lax' or '; SameSite=Strict' to the cookie definition.",
@@ -304,7 +314,7 @@ object DefensiveChecks {
                     title = "TLS Certificate is Expired",
                     severity = Severity.CRITICAL,
                     confidence = Confidence.CONFIRMED,
-                    status = FindingStatus.VERIFIED,
+                    status = FindingStatus.AUTOMATED_OBSERVATION,
                     cweId = "CWE-298",
                     owaspCategory = "A02:2021-Cryptographic Failures",
                     summary = "The server certificate expired on $notAfter. Connecting clients receive severe browser security warnings.",
@@ -314,7 +324,7 @@ object DefensiveChecks {
                     verificationCurl = "echo | openssl s_client -connect TARGET:443 2>/dev/null | openssl x509 -noout -dates"
                 )
             )
-        } else if (daysUntilExpiry <= 14) {
+        } else if (daysUntilExpiry in 0..14) {
             findings.add(
                 SecurityFindingEntity(
                     id = UUID.randomUUID().toString(),
@@ -324,13 +334,13 @@ object DefensiveChecks {
                     title = "TLS Certificate Expiring Soon (< $daysUntilExpiry Days)",
                     severity = Severity.HIGH,
                     confidence = Confidence.CONFIRMED,
-                    status = FindingStatus.VERIFIED,
+                    status = FindingStatus.AUTOMATED_OBSERVATION,
                     cweId = "CWE-298",
                     owaspCategory = "A02:2021-Cryptographic Failures",
                     summary = "The SSL/TLS certificate expires in $daysUntilExpiry days on $notAfter.",
                     technicalEvidence = "Expires: $notAfter\nIssuer: ${cert.issuerDN.name}",
                     impact = "Imminent outage and service interruption if automated renewal fails.",
-                    remediationGuidance = "Verify ACME / cert-manager automated renewal pipelines and reissue certificate.",
+                    remediationGuidance = "Verify automated ACME / cert-manager renewal pipelines and reissue certificate.",
                     verificationCurl = "echo | openssl s_client -connect TARGET:443 2>/dev/null | openssl x509 -noout -dates"
                 )
             )
@@ -347,7 +357,7 @@ object DefensiveChecks {
                     title = "Deprecated TLS Protocol Negotiated ($tlsVersion)",
                     severity = Severity.HIGH,
                     confidence = Confidence.CONFIRMED,
-                    status = FindingStatus.VERIFIED,
+                    status = FindingStatus.AUTOMATED_OBSERVATION,
                     cweId = "CWE-326",
                     owaspCategory = "A02:2021-Cryptographic Failures",
                     summary = "The server negotiated deprecated protocol $tlsVersion. TLS 1.0 and 1.1 have been deprecated by RFC 8996 and NIST guidelines.",
@@ -381,8 +391,8 @@ object DefensiveChecks {
                     category = FindingCategory.DNS,
                     title = "Missing Sender Policy Framework (SPF) DNS Record",
                     severity = Severity.MEDIUM,
-                    confidence = Confidence.CONFIRMED,
-                    status = FindingStatus.VERIFIED,
+                    confidence = Confidence.HIGH,
+                    status = FindingStatus.AUTOMATED_OBSERVATION,
                     cweId = "CWE-290",
                     owaspCategory = "A07:2021-Identification and Authentication Failures",
                     summary = "No SPF record was located in DNS TXT records. Mail servers cannot authenticate authorized sending MTAs.",
@@ -402,7 +412,7 @@ object DefensiveChecks {
                     title = "Permissive SPF Record (+all)",
                     severity = Severity.HIGH,
                     confidence = Confidence.CONFIRMED,
-                    status = FindingStatus.VERIFIED,
+                    status = FindingStatus.AUTOMATED_OBSERVATION,
                     cweId = "CWE-290",
                     owaspCategory = "A07:2021-Identification and Authentication Failures",
                     summary = "SPF record specifies '+all', permitting any internet host to send email on behalf of the domain.",
@@ -425,8 +435,8 @@ object DefensiveChecks {
                     category = FindingCategory.DNS,
                     title = "Missing DMARC Email Protection Policy",
                     severity = Severity.MEDIUM,
-                    confidence = Confidence.CONFIRMED,
-                    status = FindingStatus.VERIFIED,
+                    confidence = Confidence.HIGH,
+                    status = FindingStatus.AUTOMATED_OBSERVATION,
                     cweId = "CWE-290",
                     owaspCategory = "A07:2021-Identification and Authentication Failures",
                     summary = "No DMARC record exists at _dmarc.<target>. Recipient MTAs cannot enforce quarantine or rejection policies on spoofed messages.",
@@ -446,7 +456,7 @@ object DefensiveChecks {
                     title = "DMARC Policy Set to Monitoring Only (p=none)",
                     severity = Severity.LOW,
                     confidence = Confidence.CONFIRMED,
-                    status = FindingStatus.VERIFIED,
+                    status = FindingStatus.AUTOMATED_OBSERVATION,
                     cweId = "CWE-290",
                     owaspCategory = "A07:2021-Identification and Authentication Failures",
                     summary = "The DMARC policy is set to 'p=none', which logs reports but does not block spoofed emails from reaching inboxes.",

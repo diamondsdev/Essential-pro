@@ -5,12 +5,14 @@ import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.room.TypeConverters
+import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import com.example.data.model.ApprovedScopeEntity
 import com.example.data.model.AssessmentJobEntity
 import com.example.data.model.AuditAction
 import com.example.data.model.AuditLogEntity
 import com.example.data.model.AuthorizationRecordEntity
+import com.example.data.model.AuthorizationStatus
 import com.example.data.model.ClientEntity
 import com.example.data.model.EngagementEntity
 import com.example.data.model.EngagementStatus
@@ -29,7 +31,7 @@ import kotlinx.coroutines.launch
         SecurityFindingEntity::class,
         AuditLogEntity::class
     ],
-    version = 1,
+    version = 2,
     exportSchema = false
 )
 @TypeConverters(Converters::class)
@@ -40,6 +42,34 @@ abstract class SentinelDatabase : RoomDatabase() {
         @Volatile
         private var INSTANCE: SentinelDatabase? = null
 
+        val MIGRATION_1_2 = object : Migration(1, 2) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // clients
+                db.execSQL("ALTER TABLE clients ADD COLUMN isDemo INTEGER NOT NULL DEFAULT 0")
+                // engagements
+                db.execSQL("ALTER TABLE engagements ADD COLUMN isDemo INTEGER NOT NULL DEFAULT 0")
+                // authorizations
+                db.execSQL("ALTER TABLE authorizations ADD COLUMN evidenceHash TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE authorizations ADD COLUMN verificationStatus TEXT NOT NULL DEFAULT 'PENDING_VERIFICATION'")
+                db.execSQL("ALTER TABLE authorizations ADD COLUMN verifiedBy TEXT DEFAULT NULL")
+                db.execSQL("ALTER TABLE authorizations ADD COLUMN verifiedAtTimestamp INTEGER DEFAULT NULL")
+                db.execSQL("ALTER TABLE authorizations ADD COLUMN isDemo INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE authorizations ADD COLUMN revokedAtTimestamp INTEGER DEFAULT NULL")
+                db.execSQL("ALTER TABLE authorizations ADD COLUMN revocationReason TEXT DEFAULT NULL")
+                // approved_scopes
+                db.execSQL("ALTER TABLE approved_scopes ADD COLUMN isDemo INTEGER NOT NULL DEFAULT 0")
+                // assessment_jobs
+                db.execSQL("ALTER TABLE assessment_jobs ADD COLUMN checksPassedCount INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE assessment_jobs ADD COLUMN checksFailedCount INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE assessment_jobs ADD COLUMN isDemo INTEGER NOT NULL DEFAULT 0")
+                // security_findings
+                db.execSQL("ALTER TABLE security_findings ADD COLUMN verifiedBy TEXT DEFAULT NULL")
+                db.execSQL("ALTER TABLE security_findings ADD COLUMN verifiedAtTimestamp INTEGER DEFAULT NULL")
+                // audit_logs
+                db.execSQL("ALTER TABLE audit_logs ADD COLUMN previousHash TEXT NOT NULL DEFAULT 'GENESIS'")
+            }
+        }
+
         fun getDatabase(context: Context): SentinelDatabase {
             return INSTANCE ?: synchronized(this) {
                 val instance = Room.databaseBuilder(
@@ -47,8 +77,8 @@ abstract class SentinelDatabase : RoomDatabase() {
                     SentinelDatabase::class.java,
                     "sentinel_security_db"
                 )
+                    .addMigrations(MIGRATION_1_2)
                     .addCallback(SentinelDatabaseCallback())
-                    .fallbackToDestructiveMigration()
                     .build()
                 INSTANCE = instance
                 instance
@@ -67,95 +97,93 @@ abstract class SentinelDatabase : RoomDatabase() {
         }
 
         private suspend fun populateInitialData(dao: SentinelDao) {
-            val defaultClientId = "client-acme-corp-01"
-            val defaultEngagementId = "eng-2026-acme-posture"
+            val demoClientId = "demo-client-acme-corp"
+            val demoEngagementId = "demo-eng-2026-sample"
 
-            // 1. Initial Client
+            // 1. Initial Sample Client (Segregated as Demo)
             dao.insertClient(
                 ClientEntity(
-                    id = defaultClientId,
-                    name = "Acme Technologies Global",
-                    organization = "Acme Cyber Ops & Cloud Division",
-                    contactEmail = "security@acme-corp.internal",
+                    id = demoClientId,
+                    name = "Acme Technologies (Sample Client)",
+                    organization = "Acme Cyber Ops [DEMO ENVIRONMENT]",
+                    contactEmail = "demo-secops@acme-sample.internal",
+                    isDemo = true,
                     createdAt = System.currentTimeMillis() - 86400000L * 30
                 )
             )
 
-            // 2. Initial Active Engagement
+            // 2. Initial Sample Engagement (Marked as Demo)
             dao.insertEngagement(
                 EngagementEntity(
-                    id = defaultEngagementId,
-                    clientId = defaultClientId,
-                    title = "External Perimeter & Web Posture Audit (Q4)",
+                    id = demoEngagementId,
+                    clientId = demoClientId,
+                    title = "[DEMO] Perimeter Web Posture Review",
                     engagementType = "Defensive Web Security Assessment",
-                    leadAssessor = "Senior Security Engineer (CISSP/OSCP)",
-                    status = EngagementStatus.ACTIVE,
-                    targetEnvironment = "Production / Public Surface (Non-Destructive)",
+                    leadAssessor = "Auditor (Demo Role)",
+                    status = EngagementStatus.DRAFT,
+                    targetEnvironment = "Synthetic / Isolated Test Specimen Only",
                     startDate = System.currentTimeMillis() - 86400000L * 14,
-                    endDate = System.currentTimeMillis() + 86400000L * 45
+                    endDate = System.currentTimeMillis() + 86400000L * 45,
+                    isDemo = true
                 )
             )
 
-            // 3. Signed Written Authorization Record (ROA)
+            // 3. Unverified Sample ROA (explicitTestingPermitted = FALSE, Status = PENDING_VERIFICATION)
+            // Demonstrates that demo data NEVER bypasses authorization gates.
             dao.insertAuthorization(
                 AuthorizationRecordEntity(
-                    id = "auth-roa-2026-902",
-                    engagementId = defaultEngagementId,
-                    authorizedByName = "David Vance, CISO",
-                    authorizedByRole = "Chief Information Security Officer",
-                    authorizedByEmail = "ciso@acme-corp.internal",
-                    documentReference = "ROA-SIGNED-SOW-2026-0492.PDF",
-                    authorizationScopeSummary = "Authorization granted for defensive TLS, DNS, HTTP headers, and configuration audit of public assets scanme.nmap.org and example.com. Non-destructive only.",
+                    id = "auth-demo-sample-01",
+                    engagementId = demoEngagementId,
+                    authorizedByName = "Sample Officer (Unverified)",
+                    authorizedByRole = "Demo Role",
+                    authorizedByEmail = "demo-secops@acme-sample.internal",
+                    documentReference = "SAMPLE-DRAFT-ROA.PDF",
+                    evidenceHash = "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                    verificationStatus = AuthorizationStatus.PENDING_VERIFICATION,
+                    verifiedBy = null,
+                    verifiedAtTimestamp = null,
+                    authorizationScopeSummary = "Demo scope documentation only. Not verified for active scanning.",
                     validFromTimestamp = System.currentTimeMillis() - 86400000L * 14,
                     validToTimestamp = System.currentTimeMillis() + 86400000L * 45,
-                    explicitTestingPermitted = true,
-                    emergencyContactPhone = "+1-555-019-8234",
+                    explicitTestingPermitted = false, // Must remain false!
+                    emergencyContactPhone = "+1-555-0100",
                     signedAtTimestamp = System.currentTimeMillis() - 86400000L * 14,
-                    rulesOfEngagementNotes = "Strict scope limits: Non-destructive checks only. Prohibited: denial-of-service, automated credential stuffing, intrusive brute force."
+                    rulesOfEngagementNotes = "Sample record for demonstration. Requires auditor verification before assessment can proceed.",
+                    isDemo = true
                 )
             )
 
-            // 4. Approved Scopes (Pre-approved test domains)
+            // 4. Sample Scopes
             dao.insertScope(
                 ApprovedScopeEntity(
-                    id = "scope-01",
-                    engagementId = defaultEngagementId,
+                    id = "demo-scope-01",
+                    engagementId = demoEngagementId,
                     hostname = "scanme.nmap.org",
                     wildcardAllowed = false,
                     allowedPorts = "80,443",
                     pathPrefix = "/",
-                    active = true
-                )
-            )
-            dao.insertScope(
-                ApprovedScopeEntity(
-                    id = "scope-02",
-                    engagementId = defaultEngagementId,
-                    hostname = "example.com",
-                    wildcardAllowed = true,
-                    allowedPorts = "80,443",
-                    pathPrefix = "/",
-                    active = true
+                    active = true,
+                    isDemo = true
                 )
             )
 
-            // 5. Initial Audit Log
+            // 5. Initial Genesis Audit Log
+            val genesisHash = "GENESIS_SENTINEL_ROOT_00000000000000000000000000000000"
+            val now = System.currentTimeMillis()
+            val payload = "GENESIS|$now|System Initialize|${AuditAction.ENGAGEMENT_CREATED.name}|demo-eng-2026-sample|Database initialized with safe demo specimen"
+            val signature = "sha256:" + java.security.MessageDigest.getInstance("SHA-256")
+                .digest(payload.toByteArray())
+                .joinToString("") { "%02x".format(it) }
+
             dao.insertAuditLog(
                 AuditLogEntity(
-                    action = AuditAction.AUTHORIZATION_SIGNED,
-                    actor = "David Vance (CISO)",
-                    target = "Engagement eng-2026-acme-posture",
-                    details = "Written Authorization Record signed with document reference ROA-SIGNED-SOW-2026-0492.PDF. Scope: scanme.nmap.org, example.com",
-                    hashSignature = "sha256:7f83b1657ff1fc53b92dc18148a1d65dfc2d4b1fa3d677284addd200126d9069"
-                )
-            )
-            dao.insertAuditLog(
-                AuditLogEntity(
-                    action = AuditAction.SCOPE_ADDED,
-                    actor = "Senior Security Engineer",
-                    target = "scanme.nmap.org, example.com",
-                    details = "Approved targets locked into active scope enforcement registry with port restrictions [80, 443].",
-                    hashSignature = "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+                    timestamp = now,
+                    actor = "System Initialize",
+                    action = AuditAction.ENGAGEMENT_CREATED,
+                    target = "demo-eng-2026-sample",
+                    details = "Database initialized with safe demo specimen. Live testing disabled pending written verification.",
+                    previousHash = genesisHash,
+                    hashSignature = signature
                 )
             )
         }

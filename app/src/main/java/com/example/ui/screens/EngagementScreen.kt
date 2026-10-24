@@ -85,6 +85,8 @@ fun EngagementScreen(
     var showAddScopeDialog by remember { mutableStateOf(false) }
     var showAuthDialog by remember { mutableStateOf(false) }
     var showNewEngDialog by remember { mutableStateOf(false) }
+    var showVerifyDialog by remember { mutableStateOf(false) }
+    var showRevokeDialog by remember { mutableStateOf(false) }
 
     val dateFormat = remember { SimpleDateFormat("MMM dd, yyyy", Locale.US) }
 
@@ -95,6 +97,45 @@ fun EngagementScreen(
             .testTag("engagement_screen_list"),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
+        // Demo / Simulation Warning Banner
+        if (currentEng?.isDemo == true) {
+            item {
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = SeverityMedium.copy(alpha = 0.15f)),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, SeverityMedium),
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier.fillMaxWidth().testTag("demo_environment_banner")
+                ) {
+                    Row(
+                        modifier = Modifier.padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Lock,
+                            contentDescription = "Demo Notice",
+                            tint = SeverityMedium,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Column {
+                            Text(
+                                text = "DEMO / SEED ENVIRONMENT",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = SeverityMedium,
+                                letterSpacing = 1.sp
+                            )
+                            Text(
+                                text = "This engagement contains demo fixtures and unverified authorization. For real assessments, create a new engagement with verified written ROA.",
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
         // 1. Active Engagement Card
         item {
             Card(
@@ -163,12 +204,17 @@ fun EngagementScreen(
 
         // 2. Written Rules of Engagement (ROA) Authorization
         item {
+            val isPermitted = currentAuth?.explicitTestingPermitted == true
+            val authStatus = currentAuth?.verificationStatus ?: com.example.data.model.AuthorizationStatus.PENDING_VERIFICATION
+            val statusColor = when (authStatus) {
+                com.example.data.model.AuthorizationStatus.VERIFIED -> SeverityClean
+                com.example.data.model.AuthorizationStatus.PENDING_VERIFICATION -> SeverityMedium
+                else -> SeverityCritical
+            }
+
             Card(
                 colors = CardDefaults.cardColors(containerColor = CyberSlate900),
-                border = androidx.compose.foundation.BorderStroke(
-                    1.dp,
-                    if (currentAuth?.explicitTestingPermitted == true) SeverityClean.copy(alpha = 0.5f) else SeverityCritical
-                ),
+                border = androidx.compose.foundation.BorderStroke(1.dp, statusColor.copy(alpha = 0.8f)),
                 shape = RoundedCornerShape(12.dp),
                 modifier = Modifier.fillMaxWidth().testTag("roa_authorization_card")
             ) {
@@ -182,7 +228,7 @@ fun EngagementScreen(
                             Icon(
                                 imageVector = Icons.Default.Description,
                                 contentDescription = "Written Authorization",
-                                tint = if (currentAuth != null) SeverityClean else SeverityCritical,
+                                tint = statusColor,
                                 modifier = Modifier.size(22.dp)
                             )
                             Spacer(modifier = Modifier.width(8.dp))
@@ -190,20 +236,27 @@ fun EngagementScreen(
                                 text = "WRITTEN AUTHORIZATION (ROA)",
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.Bold,
-                                color = if (currentAuth != null) SeverityClean else SeverityCritical,
+                                color = statusColor,
                                 letterSpacing = 1.sp
                             )
                         }
 
-                        IconButton(
-                            onClick = { showAuthDialog = true },
-                            modifier = Modifier.testTag("btn_edit_roa")
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(4.dp))
+                                .background(statusColor.copy(alpha = 0.2f))
+                                .padding(horizontal = 8.dp, vertical = 3.dp)
                         ) {
-                            Icon(Icons.Default.Edit, contentDescription = "Edit ROA", tint = SentinelCyan)
+                            Text(
+                                text = authStatus.label,
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = statusColor
+                            )
                         }
                     }
 
-                    Spacer(modifier = Modifier.height(8.dp))
+                    Spacer(modifier = Modifier.height(10.dp))
 
                     if (currentAuth != null) {
                         Text(
@@ -225,13 +278,74 @@ fun EngagementScreen(
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
 
+                        if (!currentAuth?.evidenceHash.isNullOrBlank()) {
+                            Text(
+                                text = "Document Hash: ${currentAuth?.evidenceHash}",
+                                fontSize = 10.sp,
+                                fontFamily = FontFamily.Monospace,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+
+                        if (!currentAuth?.verifiedBy.isNullOrBlank()) {
+                            Text(
+                                text = "Verified By Auditor: ${currentAuth?.verifiedBy}",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = SeverityClean
+                            )
+                        }
+
+                        if (currentAuth?.verificationStatus == com.example.data.model.AuthorizationStatus.REVOKED) {
+                            Text(
+                                text = "REVOKED: ${currentAuth?.revocationReason ?: "Assessor Demand"}",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = SeverityCritical
+                            )
+                        }
+
                         val validTo = dateFormat.format(Date(currentAuth?.validToTimestamp ?: System.currentTimeMillis()))
+                        Spacer(modifier = Modifier.height(4.dp))
                         Text(
-                            text = "Window: Valid until $validTo (Explicit Consent Granted)",
+                            text = if (isPermitted) "Window: Valid until $validTo (Testing Permitted)" else "Window: Valid until $validTo (Active Testing Blocked)",
                             fontSize = 12.sp,
                             fontWeight = FontWeight.SemiBold,
-                            color = SeverityClean
+                            color = if (isPermitted) SeverityClean else SeverityCritical
                         )
+
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            OutlinedButton(
+                                onClick = { showAuthDialog = true },
+                                modifier = Modifier.weight(1f).testTag("btn_edit_roa")
+                            ) {
+                                Text("Edit ROA", fontSize = 11.sp)
+                            }
+
+                            if (!isPermitted) {
+                                Button(
+                                    onClick = { showVerifyDialog = true },
+                                    colors = ButtonDefaults.buttonColors(containerColor = SeverityClean),
+                                    shape = RoundedCornerShape(8.dp),
+                                    modifier = Modifier.weight(1f).testTag("btn_verify_roa")
+                                ) {
+                                    Text("Verify ROA", color = CyberSlate900, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                                }
+                            } else {
+                                OutlinedButton(
+                                    onClick = { showRevokeDialog = true },
+                                    colors = ButtonDefaults.outlinedButtonColors(contentColor = SeverityCritical),
+                                    modifier = Modifier.weight(1f).testTag("btn_revoke_roa")
+                                ) {
+                                    Text("Revoke ROA", fontSize = 11.sp)
+                                }
+                            }
+                        }
                     } else {
                         Text(
                             text = "NO SIGNED AUTHORIZATION ON RECORD",
@@ -244,6 +358,14 @@ fun EngagementScreen(
                             fontSize = 12.sp,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Button(
+                            onClick = { showAuthDialog = true },
+                            colors = ButtonDefaults.buttonColors(containerColor = SentinelCyan),
+                            modifier = Modifier.testTag("btn_add_roa")
+                        ) {
+                            Text("Submit Rules of Engagement", color = CyberSlate900, fontWeight = FontWeight.Bold, fontSize = 12.sp)
+                        }
                     }
                 }
             }
@@ -379,14 +501,15 @@ fun EngagementScreen(
         var authEmail by remember { mutableStateOf(currentAuth?.authorizedByEmail ?: "ciso@acme-corp.internal") }
         var docRef by remember { mutableStateOf(currentAuth?.documentReference ?: "ROA-SIGNED-SOW-2026-0492.PDF") }
         var phone by remember { mutableStateOf(currentAuth?.emergencyContactPhone ?: "+1-555-019-8234") }
+        var evidenceHash by remember { mutableStateOf(currentAuth?.evidenceHash ?: "") }
 
         AlertDialog(
             onDismissRequest = { showAuthDialog = false },
-            title = { Text("Confirm Written Authorization (ROA)", fontWeight = FontWeight.Bold) },
+            title = { Text("Submit Written Authorization (ROA)", fontWeight = FontWeight.Bold) },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text(
-                        text = "A signed agreement is legally mandatory before conducting defensive checks.",
+                        text = "Submitting documentation enters PENDING_VERIFICATION state. Testing remains blocked until explicit auditor verification.",
                         fontSize = 12.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -424,6 +547,14 @@ fun EngagementScreen(
                     )
 
                     OutlinedTextField(
+                        value = evidenceHash,
+                        onValueChange = { evidenceHash = it },
+                        label = { Text("Document Evidence SHA-256 Hash") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth().testTag("input_auth_hash")
+                    )
+
+                    OutlinedTextField(
                         value = phone,
                         onValueChange = { phone = it },
                         label = { Text("24/7 Emergency Phone") },
@@ -435,16 +566,116 @@ fun EngagementScreen(
             confirmButton = {
                 Button(
                     onClick = {
-                        viewModel.confirmAuthorization(authName, authRole, authEmail, docRef, phone)
+                        viewModel.submitAuthorization(authName, authRole, authEmail, docRef, phone, evidenceHash)
                         showAuthDialog = false
                     },
                     modifier = Modifier.testTag("btn_confirm_auth")
                 ) {
-                    Text("Save & Enforce Authorization")
+                    Text("Save Documentation")
                 }
             },
             dismissButton = {
                 TextButton(onClick = { showAuthDialog = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
+    // Dialog: Auditor Verification of Written Authorization
+    if (showVerifyDialog && currentAuth != null) {
+        var auditorName by remember { mutableStateOf("Lead Auditor (CISSP)") }
+        var verifiedHash by remember { mutableStateOf(currentAuth?.evidenceHash?.ifBlank { "sha256:7f83b1657ff1fc53b92dc18148a1d65dfc2d4b1fa3d677284addd200126d9069" } ?: "") }
+
+        AlertDialog(
+            onDismissRequest = { showVerifyDialog = false },
+            title = { Text("Auditor Verification of ROA", fontWeight = FontWeight.Bold) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        text = "I attest that I have verified the client's signed written Rules of Engagement document and verified its cryptographic hash before permitting active defensive checks.",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+
+                    OutlinedTextField(
+                        value = auditorName,
+                        onValueChange = { auditorName = it },
+                        label = { Text("Verifying Auditor Name & Credential") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth().testTag("input_verify_auditor")
+                    )
+
+                    OutlinedTextField(
+                        value = verifiedHash,
+                        onValueChange = { verifiedHash = it },
+                        label = { Text("Verified Document SHA-256 Hash") },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth().testTag("input_verify_hash")
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        if (auditorName.isNotBlank()) {
+                            viewModel.verifyAuthorization(currentAuth!!, auditorName, verifiedHash)
+                            showVerifyDialog = false
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = SeverityClean),
+                    modifier = Modifier.testTag("btn_confirm_verify_roa")
+                ) {
+                    Text("Grant Testing Permission", color = CyberSlate900, fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showVerifyDialog = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
+    // Dialog: Revoke Authorization
+    if (showRevokeDialog && currentAuth != null) {
+        var revokeReason by remember { mutableStateOf("Client requested immediate cessation of assessment activities.") }
+
+        AlertDialog(
+            onDismissRequest = { showRevokeDialog = false },
+            title = { Text("Revoke Authorization", fontWeight = FontWeight.Bold, color = SeverityCritical) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        text = "Revoking authorization immediately invalidates active testing permission. All in-flight and future scans against this engagement will be blocked.",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+
+                    OutlinedTextField(
+                        value = revokeReason,
+                        onValueChange = { revokeReason = it },
+                        label = { Text("Revocation Reason") },
+                        singleLine = false,
+                        maxLines = 3,
+                        modifier = Modifier.fillMaxWidth().testTag("input_revoke_reason")
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        viewModel.revokeAuthorization(currentAuth!!, revokeReason)
+                        showRevokeDialog = false
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = SeverityCritical),
+                    modifier = Modifier.testTag("btn_confirm_revoke_roa")
+                ) {
+                    Text("Confirm Revocation", fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showRevokeDialog = false }) {
                     Text("Cancel")
                 }
             }

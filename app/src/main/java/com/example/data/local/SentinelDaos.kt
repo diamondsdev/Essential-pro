@@ -40,11 +40,17 @@ interface SentinelDao {
     @Query("SELECT * FROM authorizations WHERE engagementId = :engagementId ORDER BY signedAtTimestamp DESC")
     fun getAuthorizationsForEngagement(engagementId: String): Flow<List<AuthorizationRecordEntity>>
 
-    @Query("SELECT * FROM authorizations WHERE engagementId = :engagementId AND explicitTestingPermitted = 1 ORDER BY signedAtTimestamp DESC LIMIT 1")
+    @Query("SELECT * FROM authorizations WHERE engagementId = :engagementId AND explicitTestingPermitted = 1 AND verificationStatus = 'VERIFIED' ORDER BY signedAtTimestamp DESC LIMIT 1")
     suspend fun getActiveAuthorization(engagementId: String): AuthorizationRecordEntity?
+
+    @Query("SELECT * FROM authorizations WHERE engagementId = :engagementId ORDER BY signedAtTimestamp DESC LIMIT 1")
+    suspend fun getLatestAuthorization(engagementId: String): AuthorizationRecordEntity?
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertAuthorization(auth: AuthorizationRecordEntity)
+
+    @Update
+    suspend fun updateAuthorization(auth: AuthorizationRecordEntity)
 
     // Approved Scopes
     @Query("SELECT * FROM approved_scopes WHERE engagementId = :engagementId ORDER BY addedAt DESC")
@@ -100,6 +106,12 @@ interface SentinelDao {
     // Audit Logs
     @Query("SELECT * FROM audit_logs ORDER BY timestamp DESC")
     fun getAllAuditLogs(): Flow<List<AuditLogEntity>>
+
+    @Query("SELECT * FROM audit_logs ORDER BY timestamp ASC")
+    suspend fun getAllAuditLogsAsc(): List<AuditLogEntity>
+
+    @Query("SELECT * FROM audit_logs ORDER BY timestamp DESC LIMIT 1")
+    suspend fun getLatestAuditLog(): AuditLogEntity?
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insertAuditLog(log: AuditLogEntity)
